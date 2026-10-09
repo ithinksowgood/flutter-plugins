@@ -83,12 +83,16 @@ class DesktopDropWeb {
 
     final web.File file = await fileCompleter.future;
 
+    return _fileToWebDropItem(file, relativePath: entry.fullPath);
+  }
+
+  WebDropItem _fileToWebDropItem(web.File file, {String? relativePath}) {
     return WebDropItem(
       uri: web.URL.createObjectURL(file),
       name: file.name,
       size: file.size,
       lastModified: DateTime.fromMillisecondsSinceEpoch(file.lastModified),
-      relativePath: entry.fullPath,
+      relativePath: relativePath,
       type: file.type,
       children: [],
     );
@@ -98,20 +102,45 @@ class DesktopDropWeb {
     web.window.ondrop = ((web.DragEvent event) {
       event.preventDefault();
 
-      final items = event.dataTransfer!.items;
+      try {
+        final items = event.dataTransfer!.items;
 
-      Future.wait(List.generate(items.length, (index) {
-        final item = items[index];
-        final entry = item.webkitGetAsEntry()!;
-        return _entryToWebDropItem(entry);
-      })).then((webItems) {
-        channel.invokeMethod(
-          "performOperation_web",
-          webItems.map((e) => e.toJson()).toList(),
-        );
-      }).catchError((e, s) {
+        // A drag can carry string items next to its files (a link, selected
+        // text, the page markup of an image dragged from a web page), and
+        // webkitGetAsEntry() returns null for those. Only file items are
+        // dropped; a file item without a FileSystemEntry is read with
+        // getAsFile().
+        final futures = <Future<WebDropItem>>[];
+        for (var index = 0; index < items.length; index++) {
+          final item = items[index];
+          if (item.kind != 'file') {
+            continue;
+          }
+          final entry = item.webkitGetAsEntry();
+          if (entry != null) {
+            futures.add(_entryToWebDropItem(entry));
+            continue;
+          }
+          final file = item.getAsFile();
+          if (file != null) {
+            futures.add(Future.value(_fileToWebDropItem(file)));
+          }
+        }
+
+        // Notified even when no file was dropped: the browser sends no
+        // dragleave after a drop, so this is what returns a DropTarget to
+        // idle (a DropDoneEvent with no files).
+        Future.wait(futures).then((webItems) {
+          channel.invokeMethod(
+            "performOperation_web",
+            webItems.map((e) => e.toJson()).toList(),
+          );
+        }).catchError((e, s) {
+          debugPrint('desktop_drop_web: $e $s');
+        });
+      } catch (e, s) {
         debugPrint('desktop_drop_web: $e $s');
-      });
+      }
     }.toJS);
 
     web.window.ondragenter = ((web.DragEvent event) {
